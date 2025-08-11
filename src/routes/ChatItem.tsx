@@ -8,14 +8,15 @@ interface Message {
   timestamp: Date;
 }
 
-export default function Test() {
+export default function ChatItem() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-
+  const chunks = useRef<string[]>([])
+  const currentAssistantIdRef = useRef<string | null>(null);
   // 自动滚动到底部
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -34,7 +35,21 @@ export default function Test() {
       return () => clearTimeout(timer);
     }
   }, [isTyping]);
-
+  function onData(key: string, value: any) {
+    if (key === '0') {
+      chunks.current.push(value);
+      // 已不再逐条插入新消息，改为在当前助手消息上累加
+      if (currentAssistantIdRef.current) {
+        setMessages(prev => prev.map(m => m.id === currentAssistantIdRef.current
+          ? { ...m, content: m.content + String(value) }
+          : m
+        ));
+      }
+      // 可选：如果要把累积内容显示到输入框，保持这一行；否则请删除
+      // setInputValue(chunks.current.join(''))
+      // document.getElementById('output').textContent = chunks.join('');
+    }
+  }
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     
@@ -54,18 +69,47 @@ export default function Test() {
 
     try {
       const agent = mastraClient.getAgent("parallelWorldAgent");
-      const response = await agent.generate({
+      console.log(JSON.stringify(Object.keys(agent || {}) || {}));
+      
+
+      // const response = await agent.generate({
+      //   messages: [{ role: "user", content: inputValue }]
+      // });
+      // const assistantMessage: Message = {
+      //   id: (Date.now() + 1).toString(),
+      //   role: "assistant",
+      //   content: response.text,
+      //   timestamp: new Date(),
+      // };
+
+      // setMessages(prev => [...prev, assistantMessage]);
+
+      const response1 = await agent.stream({
         messages: [{ role: "user", content: inputValue }]
-      });
+      })
 
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
+      // 先插入一个空的助手消息，后续逐步累加内容
+      const assistantId = `assistant-${Date.now()}`;
+      currentAssistantIdRef.current = assistantId;
+      setMessages(prev => [...prev, {
+        id: assistantId,
         role: "assistant",
-        content: response.text,
+        content: "",
         timestamp: new Date(),
-      };
+      }]);
 
-      setMessages(prev => [...prev, assistantMessage]);
+      response1.processDataStream({
+        onTextPart: (res: string) => {
+          // 累加到当前助手消息，实现打字机效果
+          if (!currentAssistantIdRef.current) return;
+          setMessages(prev => prev.map(m => m.id === currentAssistantIdRef.current
+            ? { ...m, content: m.content + String(res) }
+            : m
+          ));
+        },
+        // 某些实现会有 onFinish/onDone 回调，这里统一在 finally 中收尾
+      })
+
     } catch (error) {
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -76,6 +120,8 @@ export default function Test() {
       setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
+      setIsTyping(false);
+      currentAssistantIdRef.current = null;
     }
   }
 
