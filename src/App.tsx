@@ -1,4 +1,4 @@
-import { Routes, Route, Link } from 'react-router-dom'
+import { Routes, Route } from 'react-router-dom'
 import Home from './pages/home'
 import ChatItem from './routes/ChatItem'
 

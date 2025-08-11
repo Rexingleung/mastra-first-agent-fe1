@@ -50,6 +50,7 @@ export default function ChatItem() {
       // document.getElementById('output').textContent = chunks.join('');
     }
   }
+  console.log(onData)
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     
