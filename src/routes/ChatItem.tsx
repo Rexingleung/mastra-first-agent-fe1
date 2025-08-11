@@ -26,7 +26,6 @@ export default function ChatItem() {
     scrollToBottom();
   }, [messages, isLoading]);
 
-  // 模拟打字效果
   useEffect(() => {
     if (isTyping) {
       const timer = setTimeout(() => {
