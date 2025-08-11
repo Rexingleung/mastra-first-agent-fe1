@@ -17,6 +17,7 @@ export default function ChatItem() {
   const inputRef = useRef<HTMLInputElement>(null);
   const chunks = useRef<string[]>([])
   const currentAssistantIdRef = useRef<string | null>(null);
+  
   // 自动滚动到底部
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -34,6 +35,58 @@ export default function ChatItem() {
       return () => clearTimeout(timer);
     }
   }, [isTyping]);
+
+  // SSE数据解析函数
+  const parseSSEData = (data: string) => {
+    const lines = data.split('\n');
+    const result = {
+      messageId: null as string | null,
+      textContent: '',
+      isFinished: false,
+      finishReason: null as string | null,
+      usage: null as any
+    };
+
+    for (const line of lines) {
+      if (line.trim() === '') continue;
+      
+      try {
+        // 解析 f: 格式的元数据
+        if (line.startsWith('f:')) {
+          const metaData = JSON.parse(line.substring(2));
+          if (metaData.messageId) {
+            result.messageId = metaData.messageId;
+          }
+        }
+        // 解析 0: 格式的文本内容
+        else if (line.startsWith('0:')) {
+          const textPart = line.substring(2);
+          // 移除引号
+          const cleanText = textPart.replace(/^"(.*)"$/, '$1');
+          result.textContent += cleanText;
+        }
+        // 解析 e: 格式的结束信息
+        else if (line.startsWith('e:')) {
+          const endData = JSON.parse(line.substring(2));
+          result.isFinished = true;
+          result.finishReason = endData.finishReason;
+          result.usage = endData.usage;
+        }
+        // 解析 d: 格式的完成信息
+        else if (line.startsWith('d:')) {
+          const doneData = JSON.parse(line.substring(2));
+          result.isFinished = true;
+          result.finishReason = doneData.finishReason;
+          result.usage = doneData.usage;
+        }
+      } catch (error) {
+        console.warn('解析SSE数据行时出错:', line, error);
+      }
+    }
+
+    return result;
+  };
+
   function onData(key: string, value: any) {
     if (key === '0') {
       chunks.current.push(value);
@@ -44,12 +97,9 @@ export default function ChatItem() {
           : m
         ));
       }
-      // 可选：如果要把累积内容显示到输入框，保持这一行；否则请删除
-      // setInputValue(chunks.current.join(''))
-      // document.getElementById('output').textContent = chunks.join('');
     }
   }
-  console.log(onData)
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     
@@ -70,19 +120,6 @@ export default function ChatItem() {
     try {
       const agent = mastraClient.getAgent("parallelWorldAgent");
       console.log(JSON.stringify(Object.keys(agent || {}) || {}));
-      
-
-      // const response = await agent.generate({
-      //   messages: [{ role: "user", content: inputValue }]
-      // });
-      // const assistantMessage: Message = {
-      //   id: (Date.now() + 1).toString(),
-      //   role: "assistant",
-      //   content: response.text,
-      //   timestamp: new Date(),
-      // };
-
-      // setMessages(prev => [...prev, assistantMessage]);
 
       const response1 = await agent.stream({
         messages: [{ role: "user", content: inputValue }]
@@ -98,19 +135,82 @@ export default function ChatItem() {
         timestamp: new Date(),
       }]);
 
+      // 重置chunks
+      chunks.current = [];
+
       response1.processDataStream({
-        onTextPart: (res: string) => {
-          // 累加到当前助手消息，实现打字机效果
-          if (!currentAssistantIdRef.current) return;
-          setMessages(prev => prev.map(m => m.id === currentAssistantIdRef.current
-            ? { ...m, content: m.content + String(res) }
-            : m
-          ));
+        onTextPart: (rawData: string) => {
+          console.log('接收到原始数据:', rawData);
+          
+          try {
+            // 解析SSE格式的数据
+            const parsedData = parseSSEData(rawData);
+            
+            // 如果有文本内容，累加到当前助手消息
+            if (parsedData.textContent && currentAssistantIdRef.current) {
+              setMessages(prev => prev.map(m => m.id === currentAssistantIdRef.current
+                ? { ...m, content: m.content + parsedData.textContent }
+                : m
+              ));
+            }
+            
+            // 如果流结束，记录日志
+            if (parsedData.isFinished) {
+              console.log('流结束:', {
+                finishReason: parsedData.finishReason,
+                usage: parsedData.usage
+              });
+              setIsLoading(false);
+              setIsTyping(false);
+            }
+            
+          } catch (error) {
+            console.error('处理SSE数据时出错:', error);
+            
+            // 如果解析失败，尝试直接作为文本处理
+            if (currentAssistantIdRef.current && typeof rawData === 'string') {
+              // 简单过滤，只保留可能的文本内容
+              const lines = rawData.split('\n');
+              let textContent = '';
+              
+              for (const line of lines) {
+                if (line.startsWith('0:')) {
+                  const textPart = line.substring(2).replace(/^"(.*)"$/, '$1');
+                  textContent += textPart;
+                }
+              }
+              
+              if (textContent) {
+                setMessages(prev => prev.map(m => m.id === currentAssistantIdRef.current
+                  ? { ...m, content: m.content + textContent }
+                  : m
+                ));
+              }
+            }
+          }
         },
-        // 某些实现会有 onFinish/onDone 回调，这里统一在 finally 中收尾
-      })
+        onError: (error: any) => {
+          console.error('数据流处理错误:', error);
+          setIsLoading(false);
+          setIsTyping(false);
+          
+          if (currentAssistantIdRef.current) {
+            setMessages(prev => prev.map(m => m.id === currentAssistantIdRef.current
+              ? { ...m, content: m.content + '\n\n[处理数据流时发生错误]' }
+              : m
+            ));
+          }
+        },
+        onComplete: () => {
+          console.log('数据流处理完成');
+          setIsLoading(false);
+          setIsTyping(false);
+          currentAssistantIdRef.current = null;
+        }
+      });
 
     } catch (error) {
+      console.error('请求失败:', error);
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
@@ -119,9 +219,12 @@ export default function ChatItem() {
       };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
-      setIsLoading(false);
-      setIsTyping(false);
-      currentAssistantIdRef.current = null;
+      // 确保状态被重置
+      setTimeout(() => {
+        setIsLoading(false);
+        setIsTyping(false);
+        currentAssistantIdRef.current = null;
+      }, 100);
     }
   }
 
@@ -196,7 +299,7 @@ export default function ChatItem() {
                         : "bg-gray-100 text-gray-800 shadow-md hover:shadow-lg transition-shadow"
                     }`}
                   >
-                    <div className="text-sm leading-relaxed">{message.content}</div>
+                    <div className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</div>
                     <div
                       className={`text-xs mt-2 flex items-center justify-between ${
                         message.role === "user" ? "text-blue-100" : "text-gray-500"
